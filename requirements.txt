@@ -1,2 +1,6 @@
 fastapi
 uvicorn
+anthropic>=2.12,<3
+httpx
+edge-tts
+tzdata
