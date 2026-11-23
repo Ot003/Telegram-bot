@@ -40,6 +40,9 @@ async def lifespan(_app: FastAPI):
     bot = Bot(settings)
     background = [asyncio.create_task(bot.reminder_loop())]
 
+    if settings.keep_awake and settings.webhook_url:
+        background.append(asyncio.create_task(keep_awake(bot, settings.webhook_url)))
+
     if settings.mode == "webhook":
         if not settings.webhook_url:
             raise RuntimeError("MODE=webhook needs WEBHOOK_URL (your server's public https:// address).")
@@ -61,10 +64,21 @@ async def lifespan(_app: FastAPI):
         await bot.close()
 
 
+async def keep_awake(bot: Bot, url: str) -> None:
+    """Ping our own public URL so free hosting doesn't put the bot to sleep (reminders need it awake)."""
+    while True:
+        await asyncio.sleep(600)
+        try:
+            await bot.tg.http.get(f"{url}/health", timeout=30)
+        except Exception as e:
+            log.info("keep-awake ping failed: %s", e)
+
+
 app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
+@app.get("/health")
 def root():
     return {"status": "ok", "mode": settings.mode}
 

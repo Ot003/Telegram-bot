@@ -32,10 +32,17 @@ class Settings:
     telegram_token: str = field(default_factory=lambda: os.environ.get("TELEGRAM_BOT_TOKEN", ""))
     # Public HTTPS base URL of this server, e.g. https://my-bot.onrender.com
     # When set (and MODE=webhook), the bot registers <WEBHOOK_URL>/webhook with Telegram.
-    webhook_url: str = field(default_factory=lambda: os.environ.get("WEBHOOK_URL", "").rstrip("/"))
+    # On Render, RENDER_EXTERNAL_URL is set automatically, so nothing needs typing.
+    webhook_url: str = field(default_factory=lambda: (
+        os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL", "")).rstrip("/"))
     webhook_secret: str = field(default_factory=lambda: os.environ.get("WEBHOOK_SECRET", ""))
     # "webhook" (Telegram pushes updates to /webhook) or "polling" (bot pulls updates; no public URL needed)
-    mode: str = field(default_factory=lambda: os.environ.get("MODE", "polling").lower())
+    mode: str = field(default_factory=lambda: os.environ.get(
+        "MODE", "webhook" if os.environ.get("RENDER_EXTERNAL_URL") else "polling").lower())
+    # Free hosts (e.g. Render) put the app to sleep after ~15 idle minutes, which would stop
+    # reminders. When set, the app pings its own public URL every 10 minutes to stay awake.
+    keep_awake: bool = field(default_factory=lambda: os.environ.get(
+        "KEEP_AWAKE", "1" if os.environ.get("RENDER_EXTERNAL_URL") else "0") == "1")
     allowed_user_ids: set[int] = field(
         default_factory=lambda: _int_set(os.environ.get("ALLOWED_USER_IDS", ""))
     )
