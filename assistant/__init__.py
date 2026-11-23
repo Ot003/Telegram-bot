@@ -1,1 +1,1 @@
-"""A conversational Telegram assistant powered by Claude."""
+"""A conversational Telegram assistant powered by Gemini (free tier)."""
