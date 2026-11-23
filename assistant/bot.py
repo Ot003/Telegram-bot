@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import html
 import logging
@@ -11,7 +10,8 @@ from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-import anthropic
+from google.genai import errors as genai_errors
+from google.genai import types
 
 from .brain import Brain
 from .config import Settings
@@ -52,7 +52,7 @@ class Bot:
         self.storage = storage or Storage(settings.db_path)
         self.tg = telegram or Telegram(settings.telegram_token)
         self.brain = brain or Brain(settings, self.storage)
-        self.voice = voice or Voice(settings.tts_voice, settings.whisper_model)
+        self.voice = voice or Voice(settings.tts_voice)
         self._chat_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._seen_updates: OrderedDict[int, None] = OrderedDict()
         self._tasks: set[asyncio.Task] = set()
@@ -123,17 +123,18 @@ class Bot:
         typing = asyncio.create_task(self._keep_typing(chat_id))
         try:
             via_voice = False
-            attachments: list[dict[str, Any]] = []
+            attachments: list[types.Part] = []
 
             voice_obj = msg.get("voice") or msg.get("audio") or msg.get("video_note")
             if voice_obj:
                 try:
                     audio = await self.tg.download_file(voice_obj["file_id"])
-                    heard = await self.voice.transcribe(audio)
-                except VoiceUnavailable as e:
-                    log.warning("%s", e)
-                    await self.tg.send_text(chat_id, "I can't listen to voice messages yet on this server — "
-                                                     "could you type it instead?")
+                    mime = voice_obj.get("mime_type") or ("video/mp4" if "video_note" in msg else "audio/ogg")
+                    heard = await self.brain.transcribe(audio, mime)
+                except Exception:
+                    log.exception("Transcription failed")
+                    await self.tg.send_text(chat_id, "Sorry, I couldn't listen to that voice message — "
+                                                     "could you try again or type it?")
                     return
                 if not heard:
                     await self.tg.send_text(chat_id, "Sorry, I couldn't make out anything in that voice message.")
@@ -153,30 +154,31 @@ class Bot:
                 reply = await self.brain.respond(
                     chat_id, text, user_name=user.get("first_name"), attachments=attachments, via_voice=via_voice
                 )
-            except anthropic.RateLimitError:
-                reply = "I'm a bit overloaded right now — try again in a minute."
-            except anthropic.APIConnectionError:
-                reply = "I couldn't reach my brain just now (network problem). Please try again."
-            except anthropic.AuthenticationError:
-                log.error("Anthropic API key is missing or invalid")
-                reply = "I'm not set up correctly (my Anthropic API key is missing or invalid)."
-            except anthropic.APIStatusError as e:
-                log.error("Claude API error %s: %s", e.status_code, e.message)
-                reply = "Something went wrong on my side. Please try again."
+            except genai_errors.APIError as e:
+                log.error("Gemini API error %s: %s", e.code, e)
+                if e.code == 429:
+                    reply = ("I've hit my free usage limit for now — give me a minute (or until tomorrow if "
+                             "it's the daily limit) and try again.")
+                elif e.code in (400, 401, 403) and "key" in str(e).lower():
+                    reply = "I'm not set up correctly (my Gemini API key is missing or invalid)."
+                else:
+                    reply = "Something went wrong on my side. Please try again."
+            except Exception:
+                log.exception("Assistant turn failed")
+                reply = "I couldn't reach my brain just now. Please try again."
         finally:
             typing.cancel()
 
         await self.tg.send_text(chat_id, reply, reply_to=msg.get("message_id") if via_voice else None)
         await self._maybe_speak(chat_id, reply, via_voice)
 
-    async def _collect_attachments(self, msg: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
-        blocks: list[dict[str, Any]] = []
+    async def _collect_attachments(self, msg: dict[str, Any]) -> tuple[list[types.Part], str]:
+        blocks: list[types.Part] = []
         notes: list[str] = []
         if msg.get("photo"):
             photo = max(msg["photo"], key=lambda p: p.get("file_size", 0))
             data = await self.tg.download_file(photo["file_id"])
-            blocks.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
-                                                       "data": base64.b64encode(data).decode()}})
+            blocks.append(types.Part.from_bytes(data=data, mime_type="image/jpeg"))
         doc = msg.get("document")
         if doc:
             mime = doc.get("mime_type") or ""
@@ -185,17 +187,15 @@ class Bot:
                 notes.append(f"(The user sent a file '{name}' that is too large for me to open.)")
             elif mime == "application/pdf":
                 data = await self.tg.download_file(doc["file_id"])
-                blocks.append({"type": "document", "title": name,
-                               "source": {"type": "base64", "media_type": "application/pdf",
-                                          "data": base64.b64encode(data).decode()}})
+                blocks.append(types.Part(text=f"(Attached PDF: {name})"))
+                blocks.append(types.Part.from_bytes(data=data, mime_type="application/pdf"))
             elif mime in IMAGE_MIME_TYPES:
                 data = await self.tg.download_file(doc["file_id"])
-                blocks.append({"type": "image", "source": {"type": "base64", "media_type": mime,
-                                                           "data": base64.b64encode(data).decode()}})
+                blocks.append(types.Part.from_bytes(data=data, mime_type=mime))
             elif mime.startswith(TEXT_MIME_PREFIXES) or mime in TEXT_MIME_TYPES:
                 data = await self.tg.download_file(doc["file_id"])
                 body = data.decode("utf-8", errors="replace")
-                blocks.append({"type": "text", "text": f"<file name=\"{name}\">\n{body}\n</file>"})
+                blocks.append(types.Part(text=f"<file name=\"{name}\">\n{body}\n</file>"))
             else:
                 notes.append(f"(The user sent a file '{name}' of type {mime or 'unknown'}, which I can't open.)")
         if msg.get("location"):

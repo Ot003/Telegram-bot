@@ -39,13 +39,19 @@ class Settings:
     allowed_user_ids: set[int] = field(
         default_factory=lambda: _int_set(os.environ.get("ALLOWED_USER_IDS", ""))
     )
-    model: str = field(default_factory=lambda: os.environ.get("CLAUDE_MODEL", "claude-opus-5-5"))
-    effort: str = field(default_factory=lambda: os.environ.get("CLAUDE_EFFORT", "medium"))
+    # Free key from https://aistudio.google.com/apikey (no credit card needed)
+    gemini_api_key: str = field(
+        default_factory=lambda: os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", "")
+    )
+    # "-latest" alias always points at Google's current Flash-Lite model, which has the
+    # most generous free daily quota. Use gemini-flash-latest for a smarter, lower-quota model.
+    model: str = field(default_factory=lambda: os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest"))
     assistant_name: str = field(default_factory=lambda: os.environ.get("ASSISTANT_NAME", "Ava"))
     default_timezone: str = field(default_factory=lambda: os.environ.get("DEFAULT_TIMEZONE", "UTC"))
     db_path: str = field(default_factory=lambda: os.environ.get("DB_PATH", "assistant.db"))
     tts_voice: str = field(default_factory=lambda: os.environ.get("TTS_VOICE", "en-US-AriaNeural"))
-    whisper_model: str = field(default_factory=lambda: os.environ.get("WHISPER_MODEL", "base"))
+    # How many recent messages Gemini sees each turn (older ones stay in the database).
+    context_messages: int = field(default_factory=lambda: int(os.environ.get("CONTEXT_MESSAGES", "40")))
     # Start a fresh conversation after this many stored messages (long-term memories survive).
     max_history_messages: int = field(
         default_factory=lambda: int(os.environ.get("MAX_HISTORY_MESSAGES", "400"))

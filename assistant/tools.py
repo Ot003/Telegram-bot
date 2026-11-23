@@ -1,7 +1,7 @@
 """Tools the assistant can use, plus their implementations.
 
-Custom tools run here, in this process. Web search / web fetch are Anthropic server
-tools: Claude runs them itself and the results come back inside the response.
+Everything here runs in this process. Web search and page reading are declared here
+too but executed by brain.py, because they need their own call to Gemini.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ def _schema(properties: dict[str, Any], required: list[str] | None = None) -> di
 
 
 # Order and content are fixed for the life of the process: changing the tool list
-# mid-conversation would break prompt caching and Claude's preserved thinking.
+# mid-conversation would confuse the model and break context caching.
 CUSTOM_TOOLS: list[dict[str, Any]] = [
     {
         "name": "save_memory",
@@ -92,6 +92,20 @@ CUSTOM_TOOLS: list[dict[str, Any]] = [
         "input_schema": _schema({"timezone": {"type": "string"}}, ["timezone"]),
     },
     {
+        "name": "web_search",
+        "description": "Search the web (Google) for current information: news, prices, opening hours, "
+                       "weather, sports, anything that may have changed. Returns a summary with source links.",
+        "input_schema": _schema({"query": {"type": "string", "description": "What to look up."}}, ["query"]),
+    },
+    {
+        "name": "read_webpage",
+        "description": "Read a specific web page and answer a question about it.",
+        "input_schema": _schema({
+            "url": {"type": "string"},
+            "question": {"type": "string", "description": "What you want to know from the page."},
+        }, ["url"]),
+    },
+    {
         "name": "set_voice_replies",
         "description": "Change when you answer with a voice message: 'always', 'auto' (only when the user sent "
                        "voice) or 'off'.",
@@ -99,12 +113,7 @@ CUSTOM_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
-SERVER_TOOLS: list[dict[str, Any]] = [
-    {"type": "web_search_20260209", "name": "web_search", "max_uses": 5},
-    {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 5},
-]
-
-ALL_TOOLS = CUSTOM_TOOLS + SERVER_TOOLS
+ALL_TOOLS = CUSTOM_TOOLS
 
 
 class ToolError(Exception):

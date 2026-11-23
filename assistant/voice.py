@@ -1,9 +1,8 @@
-"""Speech: transcribe the user's voice notes and speak replies back.
+"""Speaking replies out loud.
 
-- Speech-to-text uses faster-whisper (runs locally, free). Optional: install
-  requirements-voice.txt. Without it the bot asks the user to type instead.
-- Text-to-speech uses edge-tts (free neural voices, no API key) and ffmpeg to
-  convert to the OGG/Opus format Telegram shows as a voice message.
+Text-to-speech uses edge-tts (free neural voices, no API key) and ffmpeg to convert
+to the OGG/Opus format Telegram shows as a voice message. (Listening to the user's
+voice notes is done by Gemini itself; see Brain.transcribe.)
 """
 
 from __future__ import annotations
@@ -27,41 +26,9 @@ class VoiceUnavailable(RuntimeError):
 
 
 class Voice:
-    def __init__(self, tts_voice: str, whisper_model: str):
+    def __init__(self, tts_voice: str):
         self.tts_voice = tts_voice
-        self.whisper_model_name = whisper_model
-        self._whisper = None
-        self._whisper_lock = asyncio.Lock()
 
-    # ---------- speech to text ----------
-    async def _get_whisper(self):
-        async with self._whisper_lock:
-            if self._whisper is None:
-                try:
-                    from faster_whisper import WhisperModel  # type: ignore
-                except ImportError as e:
-                    raise VoiceUnavailable(
-                        "Voice input needs faster-whisper: pip install -r requirements-voice.txt"
-                    ) from e
-                log.info("Loading Whisper model %r (first use)…", self.whisper_model_name)
-                self._whisper = await asyncio.to_thread(
-                    WhisperModel, self.whisper_model_name, device="cpu", compute_type="int8"
-                )
-        return self._whisper
-
-    async def transcribe(self, audio: bytes, suffix: str = ".ogg") -> str:
-        model = await self._get_whisper()
-
-        def _run() -> str:
-            with tempfile.NamedTemporaryFile(suffix=suffix) as f:
-                f.write(audio)
-                f.flush()
-                segments, _info = model.transcribe(f.name, vad_filter=True)
-                return " ".join(s.text.strip() for s in segments).strip()
-
-        return await asyncio.to_thread(_run)
-
-    # ---------- text to speech ----------
     @staticmethod
     def speakable(text: str) -> str:
         text = strip_html(text)

@@ -1,12 +1,14 @@
-"""The assistant's conversation loop with Claude (Messages API + tool use)."""
+"""The assistant's conversation loop, using Google Gemini (free tier) with function calling."""
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
-import anthropic
+from google import genai
+from google.genai import types
 
 from .config import Settings
 from .storage import Storage
@@ -14,18 +16,10 @@ from .tools import ALL_TOOLS, ToolRunner, fmt_local
 
 log = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 12
-
-# Models that accept server-side refusal fallbacks (`fallbacks: "default"`).
-FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-fable-5-2", "claude-sonnet-5-5"}
-
-BETAS_BASE = ["compact-2026-01-12"]
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
+MAX_TOOL_ROUNDS = 8  # each round is one request against the free daily quota
 
 
 def build_system_prompt(name: str) -> str:
-    # Keep this text fixed for the life of the process: it is the start of the cached
-    # prefix, and Claude's preserved thinking requires the prefix to stay unchanged.
     return f"""You are {name}, a personal assistant the user talks to through Telegram. You are warm, \
 direct and practical, like a capable friend who gets things done.
 
@@ -45,8 +39,7 @@ plans, routines), save it with save_memory. Memories persist across conversation
 - To-do list: add_task, list_tasks, complete_task, delete_task.
 - Reminders: set_reminder sends the user a message at a given time (one-off or repeating). Times you give \
 are in the user's local time zone; if you don't know their time zone yet and it matters, ask once and call set_timezone.
-- Look things up: web_search for current information (news, prices, opening hours, facts that may have changed) \
-and web_fetch to read a specific page. Cite sources briefly with links when you use them.
+- Look things up: web_search for current information and read_webpage for a specific link. Mention sources briefly.
 - Voice: set_voice_replies changes whether you answer with voice messages.
 - You can see images and read PDFs and text files the user sends.
 - For anything else (writing, planning, explaining, brainstorming, maths, code, advice) just help directly.
@@ -56,39 +49,54 @@ Never claim you did something unless the tool call succeeded. Each user message 
 line giving the current local date and time and other context; use it, but don't repeat it back."""
 
 
-def serialize_content(blocks: list[Any]) -> list[dict[str, Any]]:
-    """Turn SDK content blocks into plain dicts we can store and send back unchanged."""
-    out = []
-    for b in blocks:
-        if hasattr(b, "model_dump"):
-            out.append(b.model_dump(mode="json", by_alias=True, exclude_unset=True))
-        else:
-            out.append(b)
-    return out
+def to_dict(content: types.Content) -> dict[str, Any]:
+    # JSON mode base64-encodes bytes (images, thought signatures) so they survive storage.
+    return json.loads(content.model_dump_json(exclude_none=True))
 
 
-def _is_history_binding_error(err: anthropic.BadRequestError) -> bool:
-    msg = str(getattr(err, "message", err)).lower()
-    return any(k in msg for k in ("prefix", "thinking", "block_binding", "signature"))
+def from_dict(data: dict[str, Any]) -> types.Content:
+    return types.Content.model_validate_json(json.dumps(data))
+
+
+def _starts_user_turn(c: dict[str, Any]) -> bool:
+    return c.get("role") == "user" and not any("function_response" in p for p in c.get("parts", []))
+
+
+def trim_history(history: list[dict[str, Any]], max_items: int) -> list[dict[str, Any]]:
+    """Keep the most recent messages, starting on a real user message (not a tool result)."""
+    if len(history) <= max_items:
+        return history
+    tail = history[-max_items:]
+    for i, c in enumerate(tail):
+        if _starts_user_turn(c):
+            return tail[i:]
+    return tail[-1:]
 
 
 class Brain:
-    def __init__(self, settings: Settings, storage: Storage, client: anthropic.AsyncAnthropic | None = None):
+    def __init__(self, settings: Settings, storage: Storage, client: genai.Client | None = None):
         self.settings = settings
         self.storage = storage
-        self.client = client or anthropic.AsyncAnthropic()
+        self.client = client or genai.Client(api_key=settings.gemini_api_key or None)
         self.tools = ToolRunner(storage, settings.default_timezone)
-        self.system = [{"type": "text", "text": build_system_prompt(settings.assistant_name)}]
+        self.config = types.GenerateContentConfig(
+            system_instruction=build_system_prompt(settings.assistant_name),
+            tools=[types.Tool(function_declarations=[
+                types.FunctionDeclaration(name=t["name"], description=t["description"],
+                                          parameters_json_schema=t["input_schema"])
+                for t in ALL_TOOLS
+            ])],
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
 
     # ---------- building the user's turn ----------
     def context_header(self, chat_id: int, user_name: str | None, via_voice: bool, new_conversation: bool) -> str:
         tz = self.tools.tz(chat_id)
         now = datetime.now(timezone.utc)
-        parts = [f"[{fmt_local(now, tz)}, time zone {tz.key}"]
+        first = f"[{fmt_local(now, tz)}, time zone {tz.key}"
         if via_voice:
-            parts.append("sent as a voice message, transcribed")
-        parts[-1] += "]"
-        lines = [", ".join(parts)]
+            first += ", sent as a voice message, transcribed"
+        lines = [first + "]"]
         if new_conversation:
             if user_name:
                 lines.append(f"[Telegram name: {user_name}]")
@@ -102,88 +110,90 @@ class Brain:
             lines.append(f"[Since the last message: {event}]")
         return "\n".join(lines)
 
-    # ---------- main entry point ----------
     async def respond(
         self,
         chat_id: int,
         text: str,
         *,
         user_name: str | None = None,
-        attachments: list[dict[str, Any]] | None = None,
+        attachments: list[types.Part] | None = None,
         via_voice: bool = False,
     ) -> str:
         if self.storage.history_length(chat_id) >= self.settings.max_history_messages:
-            log.info("chat %s: history cap reached, starting a fresh conversation", chat_id)
             self.storage.clear_history(chat_id)
-
         new_conv = self.storage.history_length(chat_id) == 0
         header = self.context_header(chat_id, user_name, via_voice, new_conv)
-        content: list[dict[str, Any]] = [{"type": "text", "text": header}]
-        content += attachments or []
-        content.append({"type": "text", "text": text or "(no text)"})
-        self.storage.append_message(chat_id, "user", content)
-
-        try:
-            return await self._run_loop(chat_id)
-        except anthropic.BadRequestError as e:
-            if not _is_history_binding_error(e):
-                raise
-            # The stored history no longer matches what Claude expects (e.g. it was edited).
-            # Start over with just this message rather than leaving the chat stuck.
-            log.warning("chat %s: history rejected (%s); starting fresh", chat_id, e)
-            self.storage.clear_history(chat_id)
-            header = self.context_header(chat_id, user_name, via_voice, True)
-            self.storage.append_message(chat_id, "user", [{"type": "text", "text": header}] + content[1:])
-            return await self._run_loop(chat_id)
-
-    async def _create(self, messages: list[dict[str, Any]]):
-        kwargs: dict[str, Any] = dict(
-            model=self.settings.model,
-            max_tokens=16000,
-            system=self.system,
-            tools=ALL_TOOLS,
-            messages=messages,
-            output_config={"effort": self.settings.effort},
-            cache_control={"type": "ephemeral"},
-            context_management={"edits": [{"type": "compact_20260112"}]},
-            betas=list(BETAS_BASE),
-        )
-        if self.settings.model in FALLBACK_MODELS:
-            kwargs["betas"].append(FALLBACK_BETA)
-            kwargs["fallbacks"] = "default"
-        return await self.client.beta.messages.create(**kwargs)
+        parts = [types.Part(text=header), *(attachments or []), types.Part(text=text or "(no text)")]
+        self.storage.append_message(chat_id, "user", to_dict(types.Content(role="user", parts=parts)))
+        return await self._run_loop(chat_id)
 
     async def _run_loop(self, chat_id: int) -> str:
         replies: list[str] = []
         for _ in range(MAX_TOOL_ROUNDS):
-            messages = self.storage.load_history(chat_id)
-            resp = await self._create(messages)
-            content = serialize_content(resp.content)
-            if not content:
-                content = [{"type": "text", "text": "(no reply)"}]
-            self.storage.append_message(chat_id, "assistant", content)
-            replies += [b.text for b in resp.content if b.type == "text" and b.text.strip()]
-
-            if resp.stop_reason == "pause_turn":
-                continue  # server tool (web search) still working; send the turn back to resume
-            if resp.stop_reason == "refusal":
+            history = trim_history([m["content"] for m in self.storage.load_history(chat_id)],
+                                   self.settings.context_messages)
+            resp = await self.client.aio.models.generate_content(
+                model=self.settings.model, contents=[from_dict(c) for c in history], config=self.config,
+            )
+            candidate = resp.candidates[0] if resp.candidates else None
+            if candidate is None or candidate.content is None or not candidate.content.parts:
+                reason = getattr(candidate, "finish_reason", None) or getattr(resp, "prompt_feedback", None)
+                log.warning("chat %s: empty reply (%s)", chat_id, reason)
                 return "\n\n".join(replies) or "Sorry, I can't help with that one."
-            if resp.stop_reason == "max_tokens":
-                replies.append("(I ran out of room in that reply — ask me to continue.)")
-                break
-            if resp.stop_reason != "tool_use":
-                break
+            self.storage.append_message(chat_id, "model", to_dict(candidate.content))
+            replies += [p.text for p in candidate.content.parts if p.text and not p.thought and p.text.strip()]
 
+            calls = resp.function_calls or []
+            if not calls:
+                break
             results = []
-            for block in resp.content:
-                if block.type != "tool_use":
-                    continue
-                output, is_error = self.tools.run(chat_id, block.name, block.input)
-                log.info("chat %s: tool %s(%s) -> %s", chat_id, block.name, block.input, output[:200])
-                results.append({"type": "tool_result", "tool_use_id": block.id,
-                                "content": output, "is_error": is_error})
-            self.storage.append_message(chat_id, "user", results)
+            for call in calls:
+                output, is_error = await self._run_tool(chat_id, call.name, dict(call.args or {}))
+                log.info("chat %s: tool %s(%s) -> %s", chat_id, call.name, call.args, output[:200])
+                key = "error" if is_error else "result"
+                results.append(types.Part(function_response=types.FunctionResponse(
+                    id=call.id, name=call.name, response={key: output})))
+            self.storage.append_message(chat_id, "user", to_dict(types.Content(role="user", parts=results)))
         else:
             replies.append("(I stopped after too many steps — tell me if you want me to keep going.)")
-
         return "\n\n".join(replies).strip() or "Done."
+
+    # ---------- tools that need their own Gemini call ----------
+    async def _run_tool(self, chat_id: int, name: str, args: dict[str, Any]) -> tuple[str, bool]:
+        try:
+            if name == "web_search":
+                return await self._grounded(f"Search the web and give a concise, factual answer with source "
+                                            f"links for: {args['query']}", types.Tool(google_search=types.GoogleSearch())), False
+            if name == "read_webpage":
+                q = args.get("question") or "Summarise the main content."
+                return await self._grounded(f"Read {args['url']} and answer: {q}",
+                                            types.Tool(url_context=types.UrlContext())), False
+        except KeyError as e:
+            return f"Missing argument {e}", True
+        except Exception as e:  # network / quota problems: let the model tell the user
+            log.warning("%s failed: %s", name, e)
+            return f"{name} failed: {e}", True
+        return self.tools.run(chat_id, name, args)
+
+    async def _grounded(self, prompt: str, tool: types.Tool) -> str:
+        resp = await self.client.aio.models.generate_content(
+            model=self.settings.model, contents=prompt, config=types.GenerateContentConfig(tools=[tool]),
+        )
+        text = resp.text or "No results."
+        sources = []
+        try:
+            for chunk in resp.candidates[0].grounding_metadata.grounding_chunks or []:
+                if chunk.web and chunk.web.uri:
+                    sources.append(f"{chunk.web.title or 'source'}: {chunk.web.uri}")
+        except (AttributeError, IndexError, TypeError):
+            pass
+        return text + ("\n\nSources:\n" + "\n".join(sources[:5]) if sources else "")
+
+    async def transcribe(self, audio: bytes, mime_type: str = "audio/ogg") -> str:
+        resp = await self.client.aio.models.generate_content(
+            model=self.settings.model,
+            contents=[types.Part.from_bytes(data=audio, mime_type=mime_type),
+                      "Transcribe this voice message exactly, in its original language. "
+                      "Reply with only the transcript, or nothing if there is no speech."],
+        )
+        return (resp.text or "").strip()

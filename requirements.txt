@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-anthropic>=2.12,<3
+google-genai>=1.0
 httpx
 edge-tts
 tzdata

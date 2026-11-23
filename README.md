@@ -1,6 +1,6 @@
 # Telegram Assistant
 
-A personal assistant you talk to on Telegram. You can type to it or send voice notes, and it answers in text and, if you want, out loud. It runs on Claude (`claude-opus-5-5`).
+A personal assistant you talk to on Telegram. You can type to it or send voice notes, and it answers in text and, if you want, out loud. It runs on Google Gemini's free tier, so it costs nothing to run.
 
 ## What it can do
 
@@ -15,18 +15,17 @@ Commands: `/tasks`, `/reminders`, `/memory`, `/voice`, `/reset`, `/help`. Anythi
 ## Setup
 
 1. **Create the bot.** In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token.
-2. **Get a Claude API key** at <https://console.anthropic.com>.
+2. **Get a free Gemini API key** at <https://aistudio.google.com/apikey>. You sign in with a Google account, and no credit card is needed.
 3. **Configure.**
    ```bash
-   cp .env.example .env    # then fill in TELEGRAM_BOT_TOKEN and ANTHROPIC_API_KEY
+   cp .env.example .env    # then fill in TELEGRAM_BOT_TOKEN and GEMINI_API_KEY
    ```
 4. **Install and run.**
    ```bash
-   pip install -r requirements.txt            # text + voice replies
-   pip install -r requirements-voice.txt      # optional: understand voice notes (needs ffmpeg)
+   pip install -r requirements.txt   # ffmpeg is also needed for voice replies
    python main.py
    ```
-5. **Lock it to you.** Message your bot. If `ALLOWED_USER_IDS` is set and you're not on the list, it replies with your Telegram user id. Put that id in `ALLOWED_USER_IDS` and restart. If the list is empty, anyone who finds the bot can use it, and your API credits pay for it.
+5. **Lock it to you.** Message your bot. If `ALLOWED_USER_IDS` is set and you're not on the list, it replies with your Telegram user id. Put that id in `ALLOWED_USER_IDS` and restart. If the list is empty, anyone who finds the bot can use it and use up your free daily allowance.
 
 Set `DEFAULT_TIMEZONE` (for example `Europe/London`) or tell the bot where you live, so reminder times are right.
 
@@ -43,11 +42,13 @@ Data (conversations, memories, tasks, reminders) is kept in SQLite at `DB_PATH`.
 |---|---|
 | `main.py` | FastAPI app: webhook endpoint, polling, reminder loop |
 | `assistant/bot.py` | Turns Telegram messages, voice notes, files and commands into assistant turns; delivers reminders |
-| `assistant/brain.py` | The Claude loop (Messages API with tool use, web search, server-side compaction, refusal fallbacks) |
+| `assistant/brain.py` | The Gemini loop: function calling, Google Search, page reading, voice transcription |
 | `assistant/tools.py` | The assistant's tools: memory, to-dos, reminders, time zone, voice setting |
-| `assistant/voice.py` | Speech-to-text (faster-whisper, local) and text-to-speech (edge-tts) |
+| `assistant/voice.py` | Text-to-speech for voice replies (edge-tts, free) |
 | `assistant/storage.py` | SQLite persistence |
 
-Conversation history is append-only and the system prompt and tool list never change, so prompt caching keeps working. When a conversation gets long, the server compacts it automatically. Saved memories carry over into fresh conversations.
+Gemini sees the most recent 40 messages of each chat (`CONTEXT_MESSAGES`), and saved memories carry over into fresh conversations.
+
+**Free limits:** Google's free tier caps requests per minute and per day, and the caps vary by model. Check your numbers in AI Studio. One message can take a few requests when the bot uses tools. If the bot hits a cap, it tells you to try again later. Google may use free-tier conversations to improve its products.
 
 Run the tests with `pip install pytest && python -m pytest`.

@@ -32,10 +32,10 @@ async def lifespan(_app: FastAPI):
     global bot
     if not settings.telegram_token:
         raise RuntimeError("Set TELEGRAM_BOT_TOKEN (from @BotFather) in the environment or .env file.")
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        log.warning("ANTHROPIC_API_KEY is not set; Claude calls will fail unless another credential is configured.")
+    if not settings.gemini_api_key:
+        raise RuntimeError("Set GEMINI_API_KEY (free from https://aistudio.google.com/apikey).")
     if not settings.allowed_user_ids:
-        log.warning("ALLOWED_USER_IDS is empty: ANYONE who finds this bot can use it (and your API credits).")
+        log.warning("ALLOWED_USER_IDS is empty: ANYONE who finds this bot can use it (and your free quota).")
 
     bot = Bot(settings)
     background = [asyncio.create_task(bot.reminder_loop())]

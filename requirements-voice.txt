@@ -1,4 +1,0 @@
-# Optional: lets the assistant understand voice messages (speech-to-text, runs locally on CPU).
-# Also needs ffmpeg installed on the system (apt install ffmpeg / brew install ffmpeg).
--r requirements.txt
-faster-whisper

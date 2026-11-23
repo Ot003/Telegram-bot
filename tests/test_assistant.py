@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
-from anthropic.types.beta import BetaMessage
+from google.genai import types
 
 from assistant.bot import Bot
 from assistant.brain import Brain
@@ -12,30 +12,26 @@ from assistant.storage import Storage
 from assistant.tools import ToolRunner, next_occurrence, parse_local_datetime
 
 
-def make_message(content, stop_reason):
-    return BetaMessage.model_validate({
-        "id": "msg_test", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
-        "content": content, "stop_reason": stop_reason, "stop_sequence": None,
-        "usage": {"input_tokens": 10, "output_tokens": 5},
-    })
+def make_response(parts):
+    return types.GenerateContentResponse.model_validate({
+        "candidates": [{"content": {"role": "model", "parts": parts}, "finish_reason": "STOP"}]})
 
 
-class FakeMessages:
+class FakeModels:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
 
-    async def create(self, **kwargs):
-        # snapshot the messages as sent
-        import copy
-        self.calls.append(copy.deepcopy(kwargs))
+    async def generate_content(self, *, model, contents, config=None):
+        self.calls.append({"model": model, "contents": contents if isinstance(contents, str) else [c.model_dump(exclude_none=True) if hasattr(c, "model_dump") else c for c in contents],
+                           "config": config})
         return self.responses.pop(0)
 
 
 class FakeClient:
     def __init__(self, responses):
-        self.beta = type("B", (), {})()
-        self.beta.messages = FakeMessages(responses)
+        self.aio = type("A", (), {})()
+        self.aio.models = FakeModels(responses)
 
 
 class FakeTelegram:
@@ -61,30 +57,44 @@ def settings(tmp_path):
 def test_tool_loop_sets_reminder_and_replies(settings):
     storage = Storage(settings.db_path)
     client = FakeClient([
-        make_message([
-            {"type": "thinking", "thinking": "", "signature": "sig123"},
-            {"type": "tool_use", "id": "tu_1", "name": "set_reminder",
-             "input": {"text": "Call mum", "in_minutes": 30}},
-        ], "tool_use"),
-        make_message([{"type": "text", "text": "Done — I'll remind you in 30 minutes."}], "end_turn"),
+        make_response([{"function_call": {"id": "c1", "name": "set_reminder",
+                                          "args": {"text": "Call mum", "in_minutes": 30}},
+                        "thought_signature": "c2ln"}]),
+        make_response([{"text": "Done — I'll remind you in 30 minutes."}]),
     ])
     brain = Brain(settings, storage, client=client)
     reply = asyncio.run(brain.respond(7, "remind me to call mum in half an hour", user_name="Sam"))
 
     assert "remind you" in reply
     assert storage.list_reminders(7)[0]["text"] == "Call mum"
-
     history = storage.load_history(7)
-    assert [m["role"] for m in history] == ["user", "assistant", "user", "assistant"]
-    # thinking block (with signature) is stored and sent back unchanged
-    assert history[1]["content"][0] == {"type": "thinking", "thinking": "", "signature": "sig123"}
-    assert history[2]["content"][0]["type"] == "tool_result"
-    # first message carries the context header; the history sent is append-only
-    first_call, second_call = client.beta.messages.calls
-    assert "Telegram name: Sam" in first_call["messages"][0]["content"][0]["text"]
-    assert second_call["messages"][:1] == first_call["messages"]
-    assert first_call["system"] == second_call["system"] and first_call["tools"] == second_call["tools"]
-    assert first_call["fallbacks"] == "default"
+    assert [m["role"] for m in history] == ["user", "model", "user", "model"]
+    # thought signature survives storage and is sent back
+    assert history[1]["content"]["parts"][0]["thought_signature"] == "c2ln"
+    second = client.aio.models.calls[1]["contents"]
+    assert second[1]["parts"][0]["thought_signature"] == b"sig"
+    assert second[2]["parts"][0]["function_response"]["response"]["result"].startswith("Reminder #1")
+    assert "Telegram name: Sam" in client.aio.models.calls[0]["contents"][0]["parts"][0]["text"]
+
+
+def test_web_search_uses_separate_grounded_call(settings):
+    storage = Storage(settings.db_path)
+    client = FakeClient([
+        make_response([{"function_call": {"name": "web_search", "args": {"query": "weather paris"}}}]),
+        make_response([{"text": "Sunny, 18C."}]),
+        make_response([{"text": "It's sunny in Paris."}]),
+    ])
+    reply = asyncio.run(Brain(settings, storage, client=client).respond(1, "weather in paris?"))
+    assert reply == "It's sunny in Paris."
+    assert client.aio.models.calls[1]["config"].tools[0].google_search is not None
+
+
+def test_trim_history_starts_on_user_message():
+    from assistant.brain import trim_history
+    u = {"role": "user", "parts": [{"text": "hi"}]}
+    m = {"role": "model", "parts": [{"text": "yo"}]}
+    fr = {"role": "user", "parts": [{"function_response": {"name": "x", "response": {}}}]}
+    assert trim_history([u, m, u, m, fr, m, u, m], 4) == [u, m]
 
 
 def test_tool_errors_are_reported_to_model(settings):
