@@ -1,0 +1,18 @@
+# One-click setup for Render's free plan: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: onntyme-assistant
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false        # Render asks you to paste it
+      - key: GEMINI_API_KEY
+        sync: false        # Render asks you to paste it
+      - key: ALLOWED_USER_IDS
+        sync: false        # your Telegram user id (the bot tells you it)
+      - key: DEFAULT_TIMEZONE
+        value: America/New_York
+      - key: ASSISTANT_NAME
+        value: OnnTyme
