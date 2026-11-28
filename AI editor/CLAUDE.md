@@ -41,9 +41,9 @@ Build graphics as HTML compositions with HyperFrames, render them to video,
 then layer them over the edit with FFmpeg (`overlay` filter, or use
 transparent renders). Match fonts, colors and motion to the references.
 
-## Taste: inspiration, not imitation
+## Inspiration, not imitation
 
-`references/` holds taste reels: videos the user loves. Use them to understand
+`references/` holds inspiration reels: videos the user loves. Use them to understand
 *why* they work, never as templates to clone. The goal is an edit with its own
 identity that doesn't look like everyone else's.
 
