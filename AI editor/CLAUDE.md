@@ -41,10 +41,36 @@ Build graphics as HTML compositions with HyperFrames, render them to video,
 then layer them over the edit with FFmpeg (`overlay` filter, or use
 transparent renders). Match fonts, colors and motion to the references.
 
+## Taste: inspiration, not imitation
+
+`references/` holds taste reels: videos the user loves. Use them to understand
+*why* they work, never as templates to clone. The goal is an edit with its own
+identity that doesn't look like everyone else's.
+
+- **Pull out principles, not specifics.** Note what makes a reel feel good
+  (energy, rhythm, restraint, contrast, how the hook lands) and apply that
+  feeling in a new way.
+- **Don't copy** exact caption styles, fonts, color grades, transitions,
+  graphic layouts, sound effects or shot-by-shot structure.
+- **Mix sources.** Combine ideas from several references so no single one
+  dominates.
+- **Avoid trend defaults.** Skip the overused look (e.g. bouncing yellow
+  word-by-word captions, stock whoosh transitions, generic zoom punch-ins)
+  unless there is a real reason for it.
+- **Make one deliberate twist.** Every edit should have at least one choice
+  that feels distinctive: an unusual caption treatment, a custom
+  HyperFrames graphic, unexpected pacing, or a signature color.
+- **Check before export.** Ask: "Could this be mistaken for a copy of one
+  reference?" If yes, change it.
+
+When summarizing references (workflow step 2), write it as
+**"What I'm taking"** (principles) and **"What I'm doing differently"**
+(how this edit will stand apart).
+
 ## Workflow
 
 1. If given links, grab references with yt-dlp.
-2. Watch/analyse everything in `references/` and summarize the style (pacing, cut frequency, caption look, graphics) before starting.
+2. Watch/analyse everything in `references/` and write the "What I'm taking" / "What I'm doing differently" summary before starting.
 3. Cut the footage from `raw/` with FFmpeg.
 4. Generate subtitles with Whisper, fix errors, style them to match references.
 5. Build graphics with HyperFrames.
